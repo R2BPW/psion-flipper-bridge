@@ -1,0 +1,10 @@
+*.opo
+*.fap
+*.elf
+*.o
+*.d
+build/
+dist/
+.vscode/
+.ufbt/
+__pycache__/

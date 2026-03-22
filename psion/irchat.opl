@@ -1,0 +1,233 @@
+INCLUDE "SYSTEM.OXH"
+
+REM PSMACS IR Chat - 5-bit PWM NEC-like protocol
+REM
+REM Psion TX protocol (7 IrDA connects per char):
+REM   Flash 0 (start)  : followed by PAUSE 20 = 1000ms start space
+REM   Flash 1..5 (data): followed by PAUSE 5 (250ms=0) or PAUSE 11 (550ms=1)
+REM   Flash 6 (parity) : followed by PAUSE 5 or PAUSE 11
+REM   Next char's Flash 0 (or end-marker flash) terminates parity space.
+REM
+REM All gaps > 150ms (InfraredWorker raw signal timeout on Flipper).
+REM
+REM Char encoding: A=0, B=1, ... Z=25, space=26 (5 bits, MSB first)
+REM Parity: even parity (XOR of 5 data bits)
+REM
+REM Flipper thresholds (ms):
+REM   gap < 400ms  -> bit 0
+REM   gap 400-750ms -> bit 1
+REM   gap > 750ms  -> start space (new char)
+REM   gap > 2000ms -> message timeout (dispatch)
+
+PROC Main:
+  LOCAL msg$(255)
+  LOCAL i%, ch%, code%
+
+  FONT 11,0
+  PRINT "IR Chat v2 (PWM)"
+  PRINT "================"
+  PRINT ""
+
+again::
+  PRINT "Msg (A-Z, space):"
+  INPUT msg$
+  IF msg$ = ""
+    RETURN
+  ENDIF
+  msg$ = UPPER$(msg$)
+
+  PRINT "Sending: "; msg$
+
+  i% = 1
+  WHILE i% <= LEN(msg$)
+    ch% = ASC(MID$(msg$, i%, 1))
+    IF ch% >= 65 AND ch% <= 90
+      code% = ch% - 65
+    ELSEIF ch% = 32
+      code% = 26
+    ELSE
+      code% = -1
+    ENDIF
+    IF code% >= 0
+      IrSendChar:(code%)
+      PRINT MID$(msg$, i%, 1);
+    ENDIF
+    i% = i% + 1
+  ENDWH
+
+  REM End-of-message marker:
+  REM terminates parity space of last char, then 2s silence
+  REM so Flipper decodes parity and dispatches the message.
+  IrFlash:
+  PAUSE 40
+
+  PRINT ""
+  PRINT "Sent."
+
+  PRINT "Waiting for reply..."
+  Recv:
+  PRINT ""
+
+  GOTO again
+ENDP
+
+PROC IrSendChar:(code%)
+  REM Send one character: code% = 0..25 (A..Z) or 26 (space).
+  REM Emits 7 IrDA-connect bursts (start + 5 data + parity),
+  REM each followed by a timed PAUSE that encodes the bit value.
+  LOCAL j%
+  LOCAL b%
+  LOCAL bit%
+  LOCAL parity%
+
+  parity% = 0
+
+  REM Flash 0: start flash, 1000ms space
+  REM All gaps must exceed InfraredWorker raw timeout (150ms).
+  REM  Bit 0 space: PAUSE 5 = 250ms
+  REM  Bit 1 space: PAUSE 11 = 550ms
+  REM  Start space: PAUSE 20 = 1000ms
+  IrFlash:
+  PAUSE 20
+
+  REM Flashes 1..5: data bits 4 (MSB) down to 0
+  b% = 16
+  j% = 1
+  WHILE j% <= 5
+    bit% = 0
+    IF code% AND b%
+      bit% = 1
+    ENDIF
+    IF bit%
+      parity% = 1 - parity%
+    ENDIF
+    IrFlash:
+    IF bit% = 0
+      PAUSE 5
+    ELSE
+      PAUSE 11
+    ENDIF
+    b% = b% / 2
+    j% = j% + 1
+  ENDWH
+
+  REM Flash 6: parity flash
+  IrFlash:
+  IF parity% = 0
+    PAUSE 5
+  ELSE
+    PAUSE 11
+  ENDIF
+ENDP
+
+PROC IrFlash:
+  REM One IrDA connect/disconnect = one IR flash burst.
+  LOCAL ret&
+  ONERR skip
+  ret& = IrDAConnectToSend&:(KIrTinyTP$, 1)
+  skip::
+  ONERR OFF
+  ONERR skip2
+  IrDADisconnect:
+  skip2::
+  ONERR OFF
+ENDP
+
+PROC Recv:
+  REM Receive Flipper->Psion reply on TTY:B (pulse-width encoded bytes).
+  REM Byte encoding from Flipper: mark duration = bit value, space = separator.
+  LOCAL sr%(6), d%
+  LOCAL buf$(1)
+  LOCAL pbuf&, ln%
+  LOCAL v%, state%, byte%, bitn%
+  LOCAL reply$(255)
+  LOCAL rch$(1)
+  LOCAL tries%
+
+  tries% = 1
+  WHILE tries% <= 15
+    ONERR tryagain
+    LOPEN "TTY:B"
+    ONERR OFF
+    GOTO portok
+    tryagain::
+    ONERR OFF
+    PRINT ".";
+    PAUSE 100
+    tries% = tries% + 1
+  ENDWH
+  PRINT ""
+  PRINT "(TTY:B busy)"
+  RETURN
+
+  portok::
+  sr%(1) = 13 + 13*256
+  sr%(2) = 3
+  sr%(3) = 0
+  sr%(4) = 0
+  sr%(5) = 0
+  sr%(6) = 0
+  IOW(-1, 7, sr%(1), d%)
+
+  pbuf& = ADDR(buf$) + 1
+  ln% = 1
+  state% = 0
+  byte% = 0
+  bitn% = 0
+  reply$ = ""
+
+  PRINT "Listening..."
+
+  DO
+    d% = IOW(-1, 1, #pbuf&, ln%)
+    IF d% >= 0
+      v% = PEEKB(pbuf&) AND 255
+
+      IF state% = 0
+        IF v% > $90 AND v% < $E0
+          state% = 1
+          byte% = 0
+          bitn% = 0
+        ENDIF
+      ELSEIF state% = 1
+        IF v% >= $E0
+          byte% = byte% * 2 + 1
+          bitn% = bitn% + 1
+        ELSEIF v% <= $90
+          byte% = byte% * 2
+          bitn% = bitn% + 1
+        ELSE
+          REM Marker byte in data state = end of transmission
+          LCLOSE
+          PRINT ""
+          IF LEN(reply$) > 0
+            PRINT "LLM: "; reply$
+          ELSE
+            PRINT "(empty)"
+          ENDIF
+          RETURN
+        ENDIF
+        IF bitn% = 8
+          IF byte% = 4
+            REM EOT (0x04) = end of message from Flipper
+            LCLOSE
+            PRINT ""
+            IF LEN(reply$) > 0
+              PRINT "LLM: "; reply$
+            ELSE
+              PRINT "(empty)"
+            ENDIF
+            RETURN
+          ENDIF
+          IF byte% >= 32 AND byte% <= 126
+            rch$ = CHR$(byte%)
+            reply$ = reply$ + rch$
+            PRINT rch$;
+          ENDIF
+          byte% = 0
+          bitn% = 0
+        ENDIF
+      ENDIF
+    ENDIF
+  UNTIL 0
+ENDP

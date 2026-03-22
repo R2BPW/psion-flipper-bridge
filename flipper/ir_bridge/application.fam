@@ -1,0 +1,9 @@
+App(
+    appid="ir_bridge",
+    name="IR Bridge",
+    apptype=FlipperAppType.EXTERNAL,
+    entry_point="ir_bridge_app",
+    stack_size=16 * 1024,
+    fap_category="Infrared",
+    fap_icon_assets="images",
+)
