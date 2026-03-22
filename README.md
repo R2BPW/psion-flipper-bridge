@@ -12,7 +12,7 @@ Flipper Zero  (IR Bridge FAP)
 ESP32-S2 WiFi Devboard
   |  HTTPS / OpenRouter API
   v
-LLM (Gemini 2.0 Flash or other)
+LLM (OpenRouter)
   |
   v  (response returns same path)
 Flipper Zero  (pulse-width IR TX + EOT byte)
