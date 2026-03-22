@@ -1,9 +1,9 @@
-# IR Bridge: Psion MC218 <-> Flipper Zero <-> LLM
+# IR Bridge: Ericsson MC218 <-> Flipper Zero <-> LLM
 
-A working bridge that lets a **Psion MC218** (1999 palmtop, EPOC R5) chat with a large language model via infrared. The Psion types a question, sends it over IR using a 5-bit PWM protocol, a Flipper Zero decodes it and relays to an ESP32 over UART, the ESP32 queries an LLM over WiFi, and the response travels back the same path.
+A working bridge that lets a **Ericsson MC218** (1999 palmtop, EPOC R5) chat with a large language model via infrared. The Psion types a question, sends it over IR using a 5-bit PWM protocol, a Flipper Zero decodes it and relays to an ESP32 over UART, the ESP32 queries an LLM over WiFi, and the response travels back the same path.
 
 ```
-Psion MC218
+Ericsson MC218
   |  IR (5-bit PWM, IrDA connect bursts)
   v
 Flipper Zero  (IR Bridge FAP)
@@ -18,7 +18,7 @@ LLM (Gemini 2.0 Flash or other)
 Flipper Zero  (pulse-width IR TX + EOT byte)
   |  IR -> TTY:B SIR decoder, 4800 baud
   v
-Psion MC218
+Ericsson MC218
 ```
 
 ## Repository layout
@@ -98,7 +98,7 @@ Data is sent in chunks of 63 bytes back-to-back (gap between `infrared_send_raw_
 
 | Component | Notes |
 |-----------|-------|
-| Psion MC218 | EPOC Release 5, OPL. Built-in IrDA port. |
+| Ericsson MC218 | EPOC Release 5, OPL. Built-in IrDA port. |
 | Flipper Zero | Stock firmware with IR subsystem |
 | Flipper WiFi Devboard | Official ESP32-S2-WROVER, plugs into Flipper header |
 
