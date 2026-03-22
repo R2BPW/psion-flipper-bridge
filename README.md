@@ -167,4 +167,4 @@ Requires the EPOC SDK with `SYSTEM.OXH` (System OPX, provides `IrDAConnectToSend
 
 ## Why
 
-Because a 25-year-old palmtop asking a 2025 AI model questions via infrared is delightful.
+The MC218 serial cable uses a proprietary connector that is long out of production. Finding a donor cable and splicing it to RS-232 is the traditional way to connect the Psion to anything — this project eliminates that entirely.
