@@ -2,7 +2,7 @@
 
 <img width="579" height="286" alt="image" src="https://github.com/user-attachments/assets/256f465e-d1be-4f1a-aeeb-36bec438ccfd" />
 
-A working bridge that lets a **Ericsson MC218** (1999 palmtop, EPOC R5) chat with a large language model via infrared. The Psion types a question, sends it over IR using a 5-bit PWM protocol, a Flipper Zero decodes it and relays to an ESP32 over UART, the ESP32 queries an LLM over WiFi, and the response travels back the same path.
+A working bridge that lets a **Ericsson MC218** (or a Psion 5mx, a 1999 palmtop with EPOC R5) chat with a large language model via infrared. The Psion types a question, sends it over IR using a 5-bit PWM protocol, a Flipper Zero decodes it and relays to an ESP32 over UART, the ESP32 queries an LLM over WiFi, and the response travels back the same path.
 
 
 ```
