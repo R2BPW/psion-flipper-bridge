@@ -1,0 +1,243 @@
+INCLUDE "SYSTEM.OXH"
+
+REM PSMACS IR Chat v3 - SIR burst-timing protocol
+REM
+REM TX: SIR serial bursts via TTY:B (replaces IrDA connect bursts)
+REM Each character = 7 bursts (start + 5 data bits + parity)
+REM Burst = 20 bytes written to TTY:B at serial speed (~20ms)
+REM Gap timing encodes bits:
+REM   Start gap:  PAUSE 12 = 600ms
+REM   Bit 0 gap:  PAUSE 4  = 200ms
+REM   Bit 1 gap:  PAUSE 8  = 400ms
+REM   End marker: PAUSE 30 = 1500ms silence
+REM
+REM ~6-8x faster than IrDA connect version (~1.2s/char vs ~8s/char)
+REM
+REM RX: unchanged (pulse-width on TTY:B, EOT termination)
+REM
+REM Char encoding: A=0, B=1, ... Z=25, space=26 (5 bits, MSB first)
+REM Parity: even parity (XOR of 5 data bits)
+
+PROC Main:
+  LOCAL msg$(255)
+  LOCAL i%, ch%, code%
+  LOCAL sr%(6), d%
+
+  FONT 11,0
+  PRINT "IR Chat v3 (SIR)"
+  PRINT "================"
+  PRINT ""
+
+again::
+  PRINT "Msg (A-Z, space):"
+  INPUT msg$
+  IF msg$ = ""
+    RETURN
+  ENDIF
+  msg$ = UPPER$(msg$)
+
+  PRINT "Sending: "; msg$
+
+  REM Open TTY:B for SIR TX
+  ONERR txfail
+  LOPEN "TTY:B"
+  ONERR OFF
+
+  sr%(1) = 13 + 13*256
+  sr%(2) = 0
+  sr%(3) = 0
+  sr%(4) = 0
+  sr%(5) = 0
+  sr%(6) = 0
+  IOW(-1, 7, sr%(1), d%)
+
+  i% = 1
+  WHILE i% <= LEN(msg$)
+    ch% = ASC(MID$(msg$, i%, 1))
+    IF ch% >= 65 AND ch% <= 90
+      code% = ch% - 65
+    ELSEIF ch% = 32
+      code% = 26
+    ELSE
+      code% = -1
+    ENDIF
+    IF code% >= 0
+      IrSendChar:(code%)
+      PRINT MID$(msg$, i%, 1);
+    ENDIF
+    i% = i% + 1
+  ENDWH
+
+  REM End-of-message: final burst + long silence
+  SirFlash:
+  PAUSE 30
+
+  LCLOSE
+
+  PRINT ""
+  PRINT "Sent."
+
+  PRINT "Waiting for reply..."
+  Recv:
+  PRINT ""
+
+  GOTO again
+
+  txfail::
+  ONERR OFF
+  PRINT "TTY:B open failed!"
+  PRINT "Retry in 5s..."
+  PAUSE 100
+  GOTO again
+ENDP
+
+PROC IrSendChar:(code%)
+  REM Send one character using SIR burst-timing.
+  REM 7 bursts: start + 5 data bits (MSB first) + parity.
+  REM TTY:B must be open before calling this.
+  LOCAL j%
+  LOCAL b%
+  LOCAL bit%
+  LOCAL parity%
+
+  parity% = 0
+
+  REM Start burst + 600ms gap
+  SirFlash:
+  PAUSE 12
+
+  REM 5 data bits, MSB first
+  b% = 16
+  j% = 1
+  WHILE j% <= 5
+    bit% = 0
+    IF code% AND b%
+      bit% = 1
+    ENDIF
+    IF bit%
+      parity% = 1 - parity%
+    ENDIF
+    SirFlash:
+    IF bit% = 0
+      PAUSE 4
+    ELSE
+      PAUSE 8
+    ENDIF
+    b% = b% / 2
+    j% = j% + 1
+  ENDWH
+
+  REM Parity burst
+  SirFlash:
+  IF parity% = 0
+    PAUSE 4
+  ELSE
+    PAUSE 8
+  ENDIF
+ENDP
+
+PROC SirFlash:
+  REM Send a SIR burst: 20 bytes via TTY:B.
+  REM 0x55 = 01010101 - alternating bits = many IR pulses.
+  REM At ~4800 baud: 20 bytes x ~2ms = ~40ms burst.
+  LPRINT "UUUUUUUUUUUUUUUUUUUU";
+ENDP
+
+PROC Recv:
+  REM Receive Flipper->Psion reply on TTY:B (pulse-width encoded bytes).
+  REM Byte encoding from Flipper: mark duration = bit value, space = separator.
+  LOCAL sr%(6), d%
+  LOCAL buf$(1)
+  LOCAL pbuf&, ln%
+  LOCAL v%, state%, byte%, bitn%
+  LOCAL reply$(255)
+  LOCAL rch$(1)
+  LOCAL tries%
+
+  tries% = 1
+  WHILE tries% <= 15
+    ONERR tryagain
+    LOPEN "TTY:B"
+    ONERR OFF
+    GOTO portok
+    tryagain::
+    ONERR OFF
+    PRINT ".";
+    PAUSE 100
+    tries% = tries% + 1
+  ENDWH
+  PRINT ""
+  PRINT "(TTY:B busy)"
+  RETURN
+
+  portok::
+  sr%(1) = 13 + 13*256
+  sr%(2) = 3
+  sr%(3) = 0
+  sr%(4) = 0
+  sr%(5) = 0
+  sr%(6) = 0
+  IOW(-1, 7, sr%(1), d%)
+
+  pbuf& = ADDR(buf$) + 1
+  ln% = 1
+  state% = 0
+  byte% = 0
+  bitn% = 0
+  reply$ = ""
+
+  PRINT "Listening..."
+
+  DO
+    d% = IOW(-1, 1, #pbuf&, ln%)
+    IF d% >= 0
+      v% = PEEKB(pbuf&) AND 255
+
+      IF state% = 0
+        IF v% > $90 AND v% < $E0
+          state% = 1
+          byte% = 0
+          bitn% = 0
+        ENDIF
+      ELSEIF state% = 1
+        IF v% >= $E0
+          byte% = byte% * 2 + 1
+          bitn% = bitn% + 1
+        ELSEIF v% <= $90
+          byte% = byte% * 2
+          bitn% = bitn% + 1
+        ELSE
+          REM Marker byte in data state = end of transmission
+          LCLOSE
+          PRINT ""
+          IF LEN(reply$) > 0
+            PRINT "LLM: "; reply$
+          ELSE
+            PRINT "(empty)"
+          ENDIF
+          RETURN
+        ENDIF
+        IF bitn% = 8
+          IF byte% = 4
+            REM EOT (0x04) = end of message from Flipper
+            LCLOSE
+            PRINT ""
+            IF LEN(reply$) > 0
+              PRINT "LLM: "; reply$
+            ELSE
+              PRINT "(empty)"
+            ENDIF
+            RETURN
+          ENDIF
+          IF byte% >= 32 AND byte% <= 126
+            rch$ = CHR$(byte%)
+            reply$ = reply$ + rch$
+            PRINT rch$;
+          ENDIF
+          byte% = 0
+          bitn% = 0
+        ENDIF
+      ENDIF
+    ENDIF
+  UNTIL 0
+ENDP

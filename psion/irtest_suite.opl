@@ -1,0 +1,208 @@
+CONST KUidOpxIrFlash& = &101F9B01
+CONST KOpxIrFlashVersion% = $0100
+
+DECLARE OPX IRFLASH,KUidOpxIrFlash&,KOpxIrFlashVersion%
+  IrInit%: : 1
+  IrFlash%: : 2
+  IrClose%: : 3
+  IrSetSlots%:(n%) : 4
+END DECLARE
+
+REM IR Gap Timing Test Suite
+REM Sends known patterns for Flipper to record.
+REM Each test: 3s pause, then pattern, then 5s pause.
+REM Flipper records all gaps to SD card for analysis.
+
+PROC Main:
+  LOCAL err%, i%
+  LOCAL k$(8)
+
+  FONT 11,0
+  PRINT "IR Test Suite"
+  PRINT "============="
+  PRINT ""
+
+  PRINT "Init OPX..."
+  err% = IrInit%:
+  IF err% < 0
+    PRINT "IrInit err: "; err%
+    RETURN
+  ENDIF
+  PRINT "Port "; err%; " OK"
+  PRINT ""
+  PRINT "Press ENTER when Flipper"
+  PRINT "is ready to record."
+  INPUT k$
+  PRINT ""
+
+  REM Test 1: Single A [0,0,0]
+  PRINT "T1: A [0,0,0]"
+  SendChar:(0)
+  PAUSE 100
+
+  REM Test 2: Single B [0,0,1]
+  PRINT "T2: B [0,0,1]"
+  SendChar:(1)
+  PAUSE 100
+
+  REM Test 3: Single C [0,0,2]
+  PRINT "T3: C [0,0,2]"
+  SendChar:(2)
+  PAUSE 100
+
+  REM Test 4: Single D [0,1,0]
+  PRINT "T4: D [0,1,0]"
+  SendChar:(3)
+  PAUSE 100
+
+  REM Test 5: Single G [0,2,0]
+  PRINT "T5: G [0,2,0]"
+  SendChar:(6)
+  PAUSE 100
+
+  REM Test 6: Single J [1,0,0]
+  PRINT "T6: J [1,0,0]"
+  SendChar:(9)
+  PAUSE 100
+
+  REM Test 7: Single N [1,1,1]
+  PRINT "T7: N [1,1,1]"
+  SendChar:(13)
+  PAUSE 100
+
+  REM Test 8: Single S [2,0,0]
+  PRINT "T8: S [2,0,0]"
+  SendChar:(18)
+  PAUSE 100
+
+  REM Test 9: Single Z [2,2,1]
+  PRINT "T9: Z [2,2,1]"
+  SendChar:(25)
+  PAUSE 100
+
+  REM Test 10: AB [0,0,0]+[0,0,1]
+  PRINT "T10: AB"
+  SendChar:(0)
+  SendChar:(1)
+  err% = IrFlash%:
+  PAUSE 100
+
+  REM Test 11: ABC
+  PRINT "T11: ABC"
+  SendChar:(0)
+  SendChar:(1)
+  SendChar:(2)
+  err% = IrFlash%:
+  PAUSE 100
+
+  REM Test 12: HELLO
+  PRINT "T12: HELLO"
+  SendChar:(7)
+  SendChar:(4)
+  SendChar:(11)
+  SendChar:(11)
+  SendChar:(14)
+  err% = IrFlash%:
+  PAUSE 100
+
+  REM Test 13: DJ [0,1,0]+[1,0,0]
+  PRINT "T13: DJ"
+  SendChar:(3)
+  SendChar:(9)
+  err% = IrFlash%:
+  PAUSE 100
+
+  REM Test 14: SZ [2,0,0]+[2,2,1]
+  PRINT "T14: SZ"
+  SendChar:(18)
+  SendChar:(25)
+  err% = IrFlash%:
+  PAUSE 100
+
+  REM Test 15: 5x same burst for gap calibration
+  PRINT "T15: 5 bursts PAUSE 1"
+  i% = 1
+  WHILE i% <= 5
+    err% = IrFlash%:
+    PAUSE 1
+  i% = i% + 1
+  ENDWH
+  err% = IrFlash%:
+  PAUSE 100
+
+  REM Test 16: 5 bursts PAUSE 7
+  PRINT "T16: 5 bursts PAUSE 7"
+  i% = 1
+  WHILE i% <= 5
+    err% = IrFlash%:
+    PAUSE 7
+  i% = i% + 1
+  ENDWH
+  err% = IrFlash%:
+  PAUSE 100
+
+  REM Test 17: 5 bursts PAUSE 13
+  PRINT "T17: 5 bursts PAUSE 13"
+  i% = 1
+  WHILE i% <= 5
+    err% = IrFlash%:
+    PAUSE 13
+  i% = i% + 1
+  ENDWH
+  err% = IrFlash%:
+  PAUSE 100
+
+  REM Test 18: 5 bursts PAUSE 22
+  PRINT "T18: 5 bursts PAUSE 22"
+  i% = 1
+  WHILE i% <= 5
+    err% = IrFlash%:
+    PAUSE 22
+  i% = i% + 1
+  ENDWH
+  err% = IrFlash%:
+  PAUSE 100
+
+  err% = IrClose%:
+  PRINT ""
+  PRINT "=== ALL TESTS DONE ==="
+  PRINT "Press any key"
+  GET
+ENDP
+
+PROC SendChar:(code%)
+  REM Send one ternary-encoded char
+  REM 4 bursts: start + d2 + d1 + d0
+  LOCAL d0%, d1%, d2%, rem%, err%
+
+  d2% = code% / 9
+  rem% = code% - (d2% * 9)
+  d1% = rem% / 3
+  d0% = rem% - (d1% * 3)
+
+  REM Start burst + gap
+  err% = IrFlash%:
+  PAUSE 18
+
+  REM Digit 2
+  err% = IrFlash%:
+  TerPause:(d2%)
+
+  REM Digit 1
+  err% = IrFlash%:
+  TerPause:(d1%)
+
+  REM Digit 0
+  err% = IrFlash%:
+  TerPause:(d0%)
+ENDP
+
+PROC TerPause:(digit%)
+  IF digit% = 0
+    PAUSE 8
+  ELSEIF digit% = 1
+    PAUSE 11
+  ELSE
+    PAUSE 14
+  ENDIF
+ENDP

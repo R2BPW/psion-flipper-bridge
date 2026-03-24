@@ -1,0 +1,36 @@
+INCLUDE "SYSTEM.OXH"
+
+CONST KUidOpxIrFlash& = &101F9B01
+CONST KOpxIrFlashVersion% = $0100
+
+DECLARE OPX IRFLASH,KUidOpxIrFlash&,KOpxIrFlashVersion%
+  IrInit%: : 1
+  IrFlash%: : 2
+  IrClose%: : 3
+  IrSetSlots%:(n%) : 4
+END DECLARE
+
+PROC Main:
+  LOCAL r%
+
+  PRINT "OPX Test"
+  PRINT ""
+
+  PRINT "Calling IrInit..."
+  r% = IrInit%:
+  PRINT "IrInit returned: "; r%
+  PAUSE 40
+
+  PRINT "Calling IrFlash..."
+  r% = IrFlash%:
+  PRINT "IrFlash returned: "; r%
+  PAUSE 40
+
+  PRINT "Calling IrClose..."
+  r% = IrClose%:
+  PRINT "IrClose returned: "; r%
+  PAUSE 40
+
+  PRINT "Done! Press any key"
+  GET
+ENDP

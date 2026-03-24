@@ -1,0 +1,154 @@
+CONST KUidOpxIrFlash& = &101F9B01
+CONST KOpxIrFlashVersion% = $0100
+
+DECLARE OPX IRFLASH,KUidOpxIrFlash&,KOpxIrFlashVersion%
+  IrInit%: : 1
+  IrFlash%: : 2
+  IrClose%: : 3
+  IrSetSlots%:(n%) : 4
+  IrSendMsg%:(m$) : 5
+END DECLARE
+
+REM PSMACS IR Chat FAST - single-burst protocol
+REM Entire message sent as one SIR frame via OPX.
+REM OPX encodes 0x55=burst, 0xFF=gap internally.
+
+PROC Main:
+  LOCAL msg$(255)
+  LOCAL err%
+
+  FONT 11,0
+  PRINT "IR Chat FAST"
+  PRINT "============"
+  PRINT ""
+
+  PRINT "Init..."
+  err% = IrInit%:
+  IF err% < 0
+    PRINT "IrInit failed: "; err%
+    RETURN
+  ENDIF
+  PRINT "Port "; err%; " ready."
+  PRINT ""
+
+again::
+  PRINT "Msg (A-Z, space):"
+  INPUT msg$
+  IF msg$ = ""
+    GOTO cleanup
+  ENDIF
+  msg$ = UPPER$(msg$)
+
+  PRINT "Sending: "; msg$
+  err% = IrSendMsg%:(msg$)
+  IF err% = 0
+    PRINT "Sent OK!"
+  ELSE
+    PRINT "Send err: "; err%
+  ENDIF
+
+  PRINT "Waiting for reply..."
+  Recv:
+  PRINT ""
+
+  GOTO again
+
+  cleanup::
+  err% = IrClose%:
+  PRINT "Done."
+ENDP
+
+PROC Recv:
+  LOCAL sr%(6), d%
+  LOCAL buf$(1)
+  LOCAL pbuf&, ln%
+  LOCAL v%, state%, byte%, bitn%
+  LOCAL reply$(255)
+  LOCAL rch$(1)
+  LOCAL tries%
+
+  tries% = 1
+  WHILE tries% <= 15
+    ONERR tryagain
+    LOPEN "TTY:B"
+    ONERR OFF
+    GOTO portok
+    tryagain::
+    ONERR OFF
+    PRINT ".";
+    PAUSE 100
+    tries% = tries% + 1
+  ENDWH
+  PRINT ""
+  PRINT "(TTY:B busy)"
+  RETURN
+
+  portok::
+  sr%(1) = 13 + 13*256
+  sr%(2) = 3
+  sr%(3) = 0
+  sr%(4) = 0
+  sr%(5) = 0
+  sr%(6) = 0
+  IOW(-1, 7, sr%(1), d%)
+
+  pbuf& = ADDR(buf$) + 1
+  ln% = 1
+  state% = 0
+  byte% = 0
+  bitn% = 0
+  reply$ = ""
+
+  PRINT "Listening..."
+
+  DO
+    d% = IOW(-1, 1, #pbuf&, ln%)
+    IF d% >= 0
+      v% = PEEKB(pbuf&) AND 255
+
+      IF state% = 0
+        IF v% > $90 AND v% < $E0
+          state% = 1
+          byte% = 0
+          bitn% = 0
+        ENDIF
+      ELSEIF state% = 1
+        IF v% >= $E0
+          byte% = byte% * 2 + 1
+          bitn% = bitn% + 1
+        ELSEIF v% <= $90
+          byte% = byte% * 2
+          bitn% = bitn% + 1
+        ELSE
+          LCLOSE
+          PRINT ""
+          IF LEN(reply$) > 0
+            PRINT "LLM: "; reply$
+          ELSE
+            PRINT "(empty)"
+          ENDIF
+          RETURN
+        ENDIF
+        IF bitn% = 8
+          IF byte% = 4
+            LCLOSE
+            PRINT ""
+            IF LEN(reply$) > 0
+              PRINT "LLM: "; reply$
+            ELSE
+              PRINT "(empty)"
+            ENDIF
+            RETURN
+          ENDIF
+          IF byte% >= 32 AND byte% <= 126
+            rch$ = CHR$(byte%)
+            reply$ = reply$ + rch$
+            PRINT rch$;
+          ENDIF
+          byte% = 0
+          bitn% = 0
+        ENDIF
+      ENDIF
+    ENDIF
+  UNTIL 0
+ENDP

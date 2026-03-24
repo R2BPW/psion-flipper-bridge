@@ -1,0 +1,9 @@
+TARGET		irflash.opx
+TARGETTYPE	dll
+TARGETPATH	\system\opx
+UID		0x1000005d 0x101F9B01
+SOURCE		irflash.cpp
+USERINCLUDE	.
+SYSTEMINCLUDE	\epoc32\include
+LIBRARY		euser.lib oplr.lib esock.lib irda.lib
+DEFFILE		\epoc32\include\opx.def

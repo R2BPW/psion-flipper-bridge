@@ -1,0 +1,80 @@
+INCLUDE "SYSTEM.OXH"
+
+REM SIR TX Test v2 - debug version
+REM Point MC218 at Flipper, watch where it hangs
+
+PROC Main:
+  LOCAL sr%(6), d%
+  LOCAL sig%
+  LOCAL k$(8)
+  LOCAL ret&
+
+  FONT 11,0
+  PRINT "SIR TX Test v2"
+  PRINT "=============="
+  PRINT ""
+  PRINT "Point at Flipper 10-20cm"
+  PRINT ""
+
+  REM --- Test 1: LPRINT with RTS ---
+  PRINT "1: Open TTY:B"
+  ONERR fail1
+  LOPEN "TTY:B"
+  ONERR OFF
+  PRINT "  Open OK"
+
+  PRINT "2: Config sr%(2)=0"
+  sr%(1) = 13 + 13*256
+  sr%(2) = 0
+  sr%(3) = 0
+  sr%(4) = 0
+  sr%(5) = 0
+  sr%(6) = 0
+  IOW(-1, 7, sr%(1), d%)
+  PRINT "  Config OK d%="; d%
+
+  PRINT "3: Assert RTS"
+  sig% = 2
+  ONERR norts
+  IOW(-1, 9, sig%, d%)
+  PRINT "  RTS d%="; d%
+  GOTO rtsdone
+  norts::
+  ONERR OFF
+  PRINT "  IOW 9 failed"
+  rtsdone::
+  ONERR OFF
+
+  PRINT "4: LPRINT 5 bytes..."
+  LPRINT "UUUUU";
+  PRINT "  LPRINT OK!"
+
+  PRINT "5: LCLOSE"
+  LCLOSE
+  PRINT "  Close OK"
+  PRINT ""
+  PRINT "Test 1 DONE"
+  PRINT "Enter for IrDA test"
+  INPUT k$
+  GOTO test2
+
+  fail1::
+  ONERR OFF
+  PRINT "  LOPEN FAILED"
+
+  test2::
+  REM --- Test 2: IrDA burst ---
+  PRINT ""
+  PRINT "IrDA burst..."
+  ONERR irskip1
+  ret& = IrDAConnectToSend&:(KIrTinyTP$, 1)
+  irskip1::
+  ONERR OFF
+  ONERR irskip2
+  IrDADisconnect:
+  irskip2::
+  ONERR OFF
+  PRINT "IrDA burst done"
+  PRINT ""
+  PRINT "All done."
+ENDP

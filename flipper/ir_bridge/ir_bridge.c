@@ -19,26 +19,27 @@
 #define MARK_END   75000
 #define SPACE_US    5000
 
-/* 5-bit PWM NEC-like RX (Psion -> Flipper)
+/* Ternary RX decoder (Psion OPX -> Flipper)
  *
- * Protocol: Psion sends IrDA connect/disconnect bursts.
- * The gap between consecutive bursts encodes bits and framing:
+ * Protocol: Psion sends SIR bursts via OPX (RBusDevComm).
+ * Gap timing between bursts encodes ternary digits (base-3).
  *
- *   gap > 750ms  (PWM_START_MIN_MS)  -> start space (new char)
- *   gap 400-750ms (PWM_BIT1_MIN)     -> bit 1
- *   gap < 400ms  (below BIT1_MIN)    -> bit 0
+ * Per character: 4 bursts (start + digit2 + digit1 + digit0).
+ * Char code = d2*9 + d1*3 + d0: A=0, B=1, ... Z=25, space=26.
  *
- * Per character: 7 bursts (start + 5 data bits MSB-first + parity).
- * Char code: A=0, B=1, ... Z=25, space=26.
- * The 8th burst (start of next char or end marker) terminates parity.
- * Silence >= 2000ms (PWM_MSG_TIMEOUT_MS) = message complete, dispatch.
- *
- * All Psion gaps are > 150ms (InfraredWorker raw signal timeout).
+ * Gap thresholds (calibrated from OPX gaps_001 data):
+ *   gap < 150ms                    -> noise (ignored)
+ *   150ms <= gap < 300ms           -> digit 0
+ *   300ms <= gap < 430ms           -> digit 1
+ *   430ms <= gap < 550ms           -> digit 2
+ *   gap >= 550ms                   -> start (new character)
+ *   silence >= 2000ms              -> message complete, dispatch
  */
-#define PWM_BIT1_MIN_MS    1350  /* gap threshold: below=bit0, above=bit1 */
-#define PWM_START_MIN_MS   1730  /* gap > this = start space (new char)  */
-#define PWM_NOISE_MS       500   /* ignore gaps shorter than this         */
-#define PWM_MSG_TIMEOUT_MS 4000  /* silence -> message complete           */
+#define TER_NOISE_MS       150   /* ignore gaps shorter than this         */
+#define TER_D01_MS         300   /* boundary: digit0 / digit1             */
+#define TER_D12_MS         430   /* boundary: digit1 / digit2             */
+#define TER_START_MIN_MS   550   /* gap >= this = start (new char)        */
+#define TER_MSG_TIMEOUT_MS 2000  /* silence -> message complete           */
 
 #define RX_MSG_MAX 64
 
@@ -75,19 +76,18 @@ typedef enum {
 #define ESP_UART_BAUD 115200
 #define UART_BUF_SIZE 512
 
-/* PWM RX decoder state machine */
+/* Ternary RX decoder state machine */
 typedef enum {
-    PwmIdle,        /* waiting for any burst -> go to WaitConfirm */
-    PwmWaitConfirm, /* start burst fired; next burst confirms start if gap>START_MIN */
-    PwmData,        /* receiving data bits 4..0 (bit_count 0..4) then parity (5) */
-} PwmState;
+    TerIdle,        /* waiting for first burst */
+    TerWaitStart,   /* got burst, waiting for start gap (>= TER_START_MIN) */
+    TerDigit,       /* receiving ternary digits (d2, d1, d0) */
+} TerState;
 
 typedef struct {
-    PwmState state;
-    uint8_t  data;        /* 5 data bits accumulated (MSB first) */
-    uint8_t  bit_count;   /* 0..4 = data bit index; 5 = parity slot */
-    uint8_t  parity_calc; /* running XOR of received data bits */
-} PwmRxState;
+    TerState state;
+    uint8_t  trits[3];   /* d2, d1, d0 */
+    uint8_t  trit_idx;   /* 0=d2, 1=d1, 2=d0 */
+} TerRxState;
 
 /* Forward declaration for RPC handler type */
 typedef struct IrBridgeApp IrBridgeApp;
@@ -115,8 +115,8 @@ struct IrBridgeApp {
 
     uint32_t tx_timings[1024];
 
-    /* PWM RX state */
-    PwmRxState pwm_rx;
+    /* Ternary RX state */
+    TerRxState ter_rx;
     volatile uint32_t last_signal_tick;
     volatile uint32_t last_gap_ms;     /* last measured gap (debug display) */
     volatile uint32_t rx_cb_count;     /* total IR callbacks received */
@@ -207,15 +207,23 @@ static bool ch_check_timeout(IrBridgeApp* app) {
         app->waiting_llm = false;
         app->rx_msg_len = 0;
         app->rx_msg[0] = 0;
-        app->pwm_rx.state     = PwmIdle;
-        app->pwm_rx.bit_count = 0;
+        app->ter_rx.state    = TerIdle;
+        app->ter_rx.trit_idx = 0;
         ch_set_state(app, ChIdle);
         return true;
     }
     return false;
 }
 
-/* ---- IR RX callback: 5-bit PWM decoder + ACK/NAK detection ---- */
+/* ---- Classify ternary gap into digit value ---- */
+static int ter_classify_gap(uint32_t gap) {
+    if(gap < TER_D01_MS)        return 0;  /* digit 0 */
+    else if(gap < TER_D12_MS)   return 1;  /* digit 1 */
+    else if(gap < TER_START_MIN_MS) return 2;  /* digit 2 */
+    else                        return -1; /* start gap */
+}
+
+/* ---- IR RX callback: ternary decoder + ACK/NAK detection ---- */
 static void ir_rx_callback(void* ctx, InfraredWorkerSignal* signal) {
     IrBridgeApp* app = ctx;
     UNUSED(signal);
@@ -234,11 +242,11 @@ static void ir_rx_callback(void* ctx, InfraredWorkerSignal* signal) {
         return;
     }
 
-    /* Drop bursts while Flipper is transmitting or processing */
-    if(app->ch_state == ChProcessing || app->ch_state == ChFlipperTx) return;
+    /* Drop bursts while Flipper is transmitting back to Psion */
+    if(app->ch_state == ChFlipperTx) return;
 
-    /* Ignore noise (sub-20ms gaps) */
-    if(gap < PWM_NOISE_MS) return;
+    /* Ignore noise */
+    if(gap < TER_NOISE_MS) return;
 
     /* Mark channel active; refresh timeout on every burst */
     if(app->ch_state == ChIdle) {
@@ -247,66 +255,59 @@ static void ir_rx_callback(void* ctx, InfraredWorkerSignal* signal) {
         app->ch_state_tick = furi_get_tick();
     }
 
-    /* --- PWM state machine --- */
-    switch(app->pwm_rx.state) {
+    /* --- Ternary state machine --- */
+    switch(app->ter_rx.state) {
 
-    case PwmIdle:
-        /* Any burst -> this is a start flash; wait for confirmation gap */
-        app->pwm_rx.state      = PwmWaitConfirm;
-        app->pwm_rx.data       = 0;
-        app->pwm_rx.bit_count  = 0;
-        app->pwm_rx.parity_calc = 0;
+    case TerIdle:
+        /* Any burst -> wait for start gap confirmation */
+        app->ter_rx.state    = TerWaitStart;
+        app->ter_rx.trit_idx = 0;
         break;
 
-    case PwmWaitConfirm:
-        /* Gap after start flash must be >= START_MIN to confirm new char */
-        if(gap >= PWM_START_MIN_MS) {
-            /* Start confirmed: this burst is the first data-bit flash */
-            app->pwm_rx.state     = PwmData;
-            app->pwm_rx.data      = 0;
-            app->pwm_rx.bit_count = 0;
-            app->pwm_rx.parity_calc = 0;
+    case TerWaitStart:
+        if(gap >= TER_START_MIN_MS) {
+            /* Start gap confirmed -> expect digit 2 */
+            app->ter_rx.state    = TerDigit;
+            app->ter_rx.trit_idx = 0;
         } else {
-            /* Gap too short: framing error, restart */
-            app->pwm_rx.state = PwmIdle;
+            /* Gap too short for start -> noise, stay waiting */
+            app->ter_rx.state = TerIdle;
         }
         break;
 
-    case PwmData: {
-        if(gap >= PWM_START_MIN_MS) {
-            /* Unexpected long gap mid-frame: treat this burst as new start */
-            app->pwm_rx.state      = PwmWaitConfirm;
-            app->pwm_rx.data       = 0;
-            app->pwm_rx.bit_count  = 0;
-            app->pwm_rx.parity_calc = 0;
+    case TerDigit: {
+        if(gap >= TER_START_MIN_MS) {
+            /* Unexpected start gap mid-character -> framing error.
+             * Treat this as new start confirmation. */
+            app->ter_rx.trit_idx = 0;
             break;
         }
 
-        uint8_t bit = (gap >= PWM_BIT1_MIN_MS) ? 1 : 0;
+        int digit = ter_classify_gap(gap);
+        if(digit < 0) {
+            /* Should not happen (gap >= START but caught above) */
+            app->ter_rx.state = TerIdle;
+            break;
+        }
 
-        if(app->pwm_rx.bit_count < 5) {
-            /* Data bit (4 down to 0, MSB first) */
-            app->pwm_rx.data = (app->pwm_rx.data << 1) | bit;
-            app->pwm_rx.parity_calc ^= bit;
-            app->pwm_rx.bit_count++;
-        } else {
-            /* Parity bit: verify and emit character */
-            bool parity_ok = (bit == app->pwm_rx.parity_calc);
-            if(parity_ok) {
-                uint8_t code = app->pwm_rx.data;
-                char ch = 0;
-                if(code <= 25)      ch = (char)('A' + code);
-                else if(code == 26) ch = ' ';
-                if(ch && app->rx_msg_len < RX_MSG_MAX - 1) {
-                    app->rx_msg[app->rx_msg_len++] = ch;
-                    app->rx_msg[app->rx_msg_len]   = 0;
-                }
+        app->ter_rx.trits[app->ter_rx.trit_idx] = (uint8_t)digit;
+        app->ter_rx.trit_idx++;
+
+        if(app->ter_rx.trit_idx >= 3) {
+            /* All 3 trits received -> reconstruct character */
+            uint8_t code = app->ter_rx.trits[0] * 9
+                         + app->ter_rx.trits[1] * 3
+                         + app->ter_rx.trits[2];
+            char ch = 0;
+            if(code <= 25)      ch = (char)('A' + code);
+            else if(code == 26) ch = ' ';
+            if(ch && app->rx_msg_len < RX_MSG_MAX - 1) {
+                app->rx_msg[app->rx_msg_len++] = ch;
+                app->rx_msg[app->rx_msg_len]   = 0;
             }
-            /* This burst is the start flash of the next char (or end marker) */
-            app->pwm_rx.state      = PwmWaitConfirm;
-            app->pwm_rx.data       = 0;
-            app->pwm_rx.bit_count  = 0;
-            app->pwm_rx.parity_calc = 0;
+            /* This burst is also start of next char -> wait for start gap */
+            app->ter_rx.state    = TerWaitStart;
+            app->ter_rx.trit_idx = 0;
         }
         break;
     }
@@ -492,7 +493,7 @@ static void send_to_psion(IrBridgeApp* app, const char* text) {
     infrared_send_raw_ext(app->tx_timings, 2, true, TX_FREQ, TX_DUTY);
 
     /* Restore normal RX mode */
-    app->pwm_rx.state = PwmIdle;
+    app->ter_rx.state = TerIdle;
     infrared_worker_rx_start(app->ir_worker);
 
     char line[LINE_LEN];
@@ -596,10 +597,8 @@ static void rpc_handle_reset(IrBridgeApp* app, uint8_t opcode,
     UNUSED(opcode); UNUSED(params); UNUSED(params_len);
     app->rx_msg_len = 0;
     app->rx_msg[0] = 0;
-    app->pwm_rx.state      = PwmIdle;
-    app->pwm_rx.data       = 0;
-    app->pwm_rx.bit_count  = 0;
-    app->pwm_rx.parity_calc = 0;
+    app->ter_rx.state    = TerIdle;
+    app->ter_rx.trit_idx = 0;
     app->waiting_llm = false;
     app->line_idx = 0;
     /* Reset channel to idle before responding */
@@ -846,7 +845,7 @@ static void draw_callback(Canvas* canvas, void* ctx) {
     IrBridgeApp* app = ctx;
     canvas_clear(canvas);
     canvas_set_font(canvas, FontPrimary);
-    canvas_draw_str(canvas, 2, 10, "IR Bridge v12 [PWM]");
+    canvas_draw_str(canvas, 2, 10, "IR Bridge v14 [TER]");
 
     {
         char tmp[16];
@@ -900,7 +899,7 @@ int32_t ir_bridge_app(void* p) {
     UNUSED(p);
     IrBridgeApp* app = malloc(sizeof(IrBridgeApp));
     memset(app, 0, sizeof(IrBridgeApp));
-    app->pwm_rx.state = PwmIdle;
+    app->ter_rx.state = TerIdle;
 
     app->mq = furi_message_queue_alloc(8, sizeof(AppEvent));
     app->vp = view_port_alloc();
@@ -936,7 +935,7 @@ int32_t ir_bridge_app(void* p) {
     /* Initialize channel state (Step 33) */
     ch_set_state(app, ChIdle);
 
-    add_line(app, "5-bit PWM RX active");
+    add_line(app, "Ternary RX active");
     app->running = true;
     AppEvent evt;
 
@@ -958,10 +957,8 @@ int32_t ir_bridge_app(void* p) {
                 else if(evt.input.key == InputKeyLeft) {
                     app->rx_msg_len = 0;
                     app->rx_msg[0] = 0;
-                    app->pwm_rx.state      = PwmIdle;
-                    app->pwm_rx.data       = 0;
-                    app->pwm_rx.bit_count  = 0;
-                    app->pwm_rx.parity_calc = 0;
+                    app->ter_rx.state    = TerIdle;
+                    app->ter_rx.trit_idx = 0;
                     app->waiting_llm = false;
                     app->line_idx = 0;
                     ch_set_state(app, ChIdle);
@@ -987,8 +984,8 @@ int32_t ir_bridge_app(void* p) {
         /* Check for message timeout (800 ms silence = message complete) */
         if(app->rx_msg_len > 0) {
             uint32_t elapsed = furi_get_tick() - app->last_signal_tick;
-            if(elapsed >= PWM_MSG_TIMEOUT_MS) {
-                app->pwm_rx.state = PwmIdle;
+            if(elapsed >= TER_MSG_TIMEOUT_MS) {
+                app->ter_rx.state = TerIdle;
                 char line[LINE_LEN];
                 snprintf(line, LINE_LEN, "RX(%u): %.30s",
                     (unsigned)app->rx_msg_len, app->rx_msg);
