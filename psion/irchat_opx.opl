@@ -1,5 +1,3 @@
-INCLUDE "SYSTEM.OXH"
-
 CONST KUidOpxIrFlash& = &101F9B01
 CONST KOpxIrFlashVersion% = $0100
 
@@ -8,45 +6,29 @@ DECLARE OPX IRFLASH,KUidOpxIrFlash&,KOpxIrFlashVersion%
   IrFlash%: : 2
   IrClose%: : 3
   IrSetSlots%:(n%) : 4
+  IrSendMsg%:(m$) : 5
 END DECLARE
 
-REM PSMACS IR Chat v7 - OPX fast burst
-REM
-REM Uses native IrFlash OPX for ~5-10x faster IR bursts.
-REM IrFlash OPX uses IrDA sockets with 1 discovery slot,
-REM bypassing full IrDA discovery overhead.
-REM
-REM Expected: ~100-200ms per burst vs ~955ms with OPL IrDA.
-REM Ternary encoding: 4 bursts per char.
-REM
-REM Gap timing (calibrated from gaps_001 data):
-REM   Start:   PAUSE 13 = 650ms  (gap ~680ms, OPX start >= 550)
-REM   Digit 0: PAUSE 4  = 200ms  (gap ~230ms, d0 < 300)
-REM   Digit 1: PAUSE 7  = 350ms  (gap ~380ms, d1 300-399)
-REM   Digit 2: PAUSE 9  = 450ms  (gap ~480ms, d2 400-549)
-REM
-REM NOTE: Flipper thresholds need recalibration for these
-REM faster gaps. Run test mode first to measure actual gaps.
+REM PSMACS IR Chat v8 — 38kHz carrier protocol
+REM One IrSendMsg call = entire message in ~100ms
+REM OPX encodes as mark/space at 38400 baud
 
 PROC Main:
   LOCAL msg$(255)
-  LOCAL i%, ch%, code%
-  LOCAL d0%, d1%, d2%, rem%
   LOCAL err%
-  LOCAL k$(8)
 
   FONT 11,0
-  PRINT "IR Chat v7 (OPX)"
-  PRINT "================"
+  PRINT "IR Chat v8 (38kHz)"
+  PRINT "=================="
   PRINT ""
 
-  PRINT "Init IrFlash OPX..."
+  PRINT "Init..."
   err% = IrInit%:
   IF err% < 0
     PRINT "IrInit failed: "; err%
     RETURN
   ENDIF
-  PRINT "OPX ready (port "; err%; ")"
+  PRINT "Port "; err%; " ready."
   PRINT ""
 
 again::
@@ -58,83 +40,23 @@ again::
   msg$ = UPPER$(msg$)
 
   PRINT "Sending: "; msg$
-
-  i% = 1
-  WHILE i% <= LEN(msg$)
-    ch% = ASC(MID$(msg$, i%, 1))
-    IF ch% >= 65 AND ch% <= 90
-      code% = ch% - 65
-    ELSEIF ch% = 32
-      code% = 26
-    ELSE
-      code% = -1
-    ENDIF
-    IF code% >= 0
-      REM Decompose into base-3
-      d2% = code% / 9
-      rem% = code% - (d2% * 9)
-      d1% = rem% / 3
-      d0% = rem% - (d1% * 3)
-
-      REM Start burst + gap
-      err% = IrFlash%:
-      PAUSE 13
-
-      REM Digit 2
-      err% = IrFlash%:
-      TerPause:(d2%)
-
-      REM Digit 1
-      err% = IrFlash%:
-      TerPause:(d1%)
-
-      REM Digit 0
-      err% = IrFlash%:
-      TerPause:(d0%)
-
-      PRINT MID$(msg$, i%, 1);
-    ENDIF
-    i% = i% + 1
-  ENDWH
-
-  REM Final burst: completes last char's d0 digit
-  err% = IrFlash%:
-
-  REM Silence for message timeout
-  PAUSE 40
-
+  err% = IrSendMsg%:(msg$)
+  IF err% = 0
+    PRINT "Sent!"
+  ELSE
+    PRINT "Err: "; err%
+  ENDIF
   PRINT ""
-  PRINT "Sent."
-
-  REM Close OPX port before RX (avoids TTY:B conflict)
-  err% = IrClose%:
 
   PRINT "Waiting for reply..."
   Recv:
   PRINT ""
-
-  REM Re-open OPX port for next TX
-  err% = IrInit%:
-  IF err% < 0
-    PRINT "IrInit failed: "; err%
-    RETURN
-  ENDIF
 
   GOTO again
 
   cleanup::
   err% = IrClose%:
   PRINT "Done."
-ENDP
-
-PROC TerPause:(digit%)
-  IF digit% = 0
-    PAUSE 4
-  ELSEIF digit% = 1
-    PAUSE 7
-  ELSE
-    PAUSE 9
-  ENDIF
 ENDP
 
 PROC Recv:
@@ -184,7 +106,6 @@ PROC Recv:
     d% = IOW(-1, 1, #pbuf&, ln%)
     IF d% >= 0
       v% = PEEKB(pbuf&) AND 255
-
       IF state% = 0
         IF v% > $90 AND v% < $E0
           state% = 1

@@ -123,6 +123,12 @@ struct IrBridgeApp {
     char rx_msg[RX_MSG_MAX];
     size_t rx_msg_len;
 
+    /* Adaptive calibration: thresholds derived from first start gap */
+    bool     cal_done;       /* true after first start gap measured */
+    uint32_t cal_d01;        /* adaptive d0/d1 boundary */
+    uint32_t cal_d12;        /* adaptive d1/d2 boundary */
+    uint32_t cal_start;      /* adaptive start threshold */
+
     /* ACK/NAK state for framed TX */
     volatile uint8_t ack_bursts;        /* burst count after TX (1=ACK, 2=NAK) */
     volatile bool    awaiting_ack;      /* true while waiting for ACK/NAK */
@@ -216,17 +222,95 @@ static bool ch_check_timeout(IrBridgeApp* app) {
 }
 
 /* ---- Classify ternary gap into digit value ---- */
-static int ter_classify_gap(uint32_t gap) {
-    if(gap < TER_D01_MS)        return 0;  /* digit 0 */
-    else if(gap < TER_D12_MS)   return 1;  /* digit 1 */
-    else if(gap < TER_START_MIN_MS) return 2;  /* digit 2 */
-    else                        return -1; /* start gap */
+static int ter_classify_gap(IrBridgeApp* app, uint32_t gap) {
+    uint32_t d01 = app->cal_done ? app->cal_d01 : TER_D01_MS;
+    uint32_t d12 = app->cal_done ? app->cal_d12 : TER_D12_MS;
+    uint32_t start = app->cal_done ? app->cal_start : TER_START_MIN_MS;
+    if(gap < d01)        return 0;  /* digit 0 */
+    else if(gap < d12)   return 1;  /* digit 1 */
+    else if(gap < start) return 2;  /* digit 2 */
+    else                 return -1; /* start gap */
+}
+
+/* ---- 38kHz fast decoder: parse mark/space from raw signal ---- */
+/* At 38400 baud: mark=0x00 (~260us/byte), space=0xFF (~260us/byte)
+ * Header: ~8ms mark + ~4ms space
+ * Digit: ~1ms mark + space (1ms=d0, 2ms=d1, 3ms=d2)
+ * 3 digits per char, ternary encoding */
+#define FAST38_HEADER_MIN_US  4000   /* header mark >= 4ms */
+#define FAST38_D1_MIN_US      1500   /* space >= 1.5ms = digit 1 */
+#define FAST38_D2_MIN_US      2500   /* space >= 2.5ms = digit 2 */
+#define FAST38_MIN_TIMINGS    8      /* minimum entries for valid signal */
+
+static void decode_fast38(IrBridgeApp* app, const uint32_t* t, size_t cnt) {
+    if(cnt < FAST38_MIN_TIMINGS) return;
+
+    /* First mark must be header (>= 4ms) */
+    if(t[0] < FAST38_HEADER_MIN_US) return;
+
+    /* Parse digit spaces: t[1]=header space, then pairs (mark, space) */
+    size_t spaces = cnt / 2;
+    char msg[RX_MSG_MAX];
+    size_t msg_len = 0;
+    uint8_t trits[3];
+    uint8_t trit_idx = 0;
+
+    /* Skip header space (index 0), start from first digit space */
+    for(size_t s = 1; s < spaces && msg_len < RX_MSG_MAX - 1; s++) {
+        uint32_t space_us = t[s * 2 + 1];  /* space at odd indices */
+        uint32_t mark_us = t[s * 2];        /* mark at even indices */
+        (void)mark_us;  /* mark duration ignored for now */
+
+        uint8_t digit;
+        if(space_us >= FAST38_D2_MIN_US)      digit = 2;
+        else if(space_us >= FAST38_D1_MIN_US) digit = 1;
+        else                                  digit = 0;
+
+        trits[trit_idx++] = digit;
+
+        if(trit_idx >= 3) {
+            uint8_t code = trits[0] * 9 + trits[1] * 3 + trits[2];
+            char ch = 0;
+            if(code <= 25)      ch = (char)('A' + code);
+            else if(code == 26) ch = ' ';
+            if(ch) msg[msg_len++] = ch;
+            trit_idx = 0;
+        }
+    }
+
+    if(msg_len > 0) {
+        msg[msg_len] = 0;
+        strlcpy(app->rx_msg, msg, RX_MSG_MAX);
+        app->rx_msg_len = msg_len;
+
+        char line[LINE_LEN];
+        snprintf(line, LINE_LEN, "F38>%.30s", msg);
+        add_line(app, line);
+
+        ch_set_state(app, ChPsionTx);
+        AppEvent evt = {.type = EvtIrRx};
+        furi_message_queue_put(app->mq, &evt, 0);
+    }
 }
 
 /* ---- IR RX callback: ternary decoder + ACK/NAK detection ---- */
 static void ir_rx_callback(void* ctx, InfraredWorkerSignal* signal) {
     IrBridgeApp* app = ctx;
-    UNUSED(signal);
+
+    /* Try 38kHz fast protocol first (single raw signal = whole message) */
+    if(!infrared_worker_signal_is_decoded(signal)) {
+        const uint32_t* timings;
+        size_t timings_cnt;
+        infrared_worker_get_raw_signal(signal, &timings, &timings_cnt);
+        if(timings_cnt >= FAST38_MIN_TIMINGS && timings[0] >= FAST38_HEADER_MIN_US) {
+            decode_fast38(app, timings, timings_cnt);
+            app->last_signal_tick = furi_get_tick();
+            app->last_gap_ms = timings[0] / 1000;
+            return;
+        }
+    }
+
+    /* Legacy gap-timing decoder */
     uint32_t now  = furi_get_tick();
     uint32_t gap  = now - app->last_signal_tick;
     app->last_signal_tick = now;
@@ -264,9 +348,17 @@ static void ir_rx_callback(void* ctx, InfraredWorkerSignal* signal) {
         app->ter_rx.trit_idx = 0;
         break;
 
-    case TerWaitStart:
-        if(gap >= TER_START_MIN_MS) {
-            /* Start gap confirmed -> expect digit 2 */
+    case TerWaitStart: {
+        uint32_t start_thr = app->cal_done ? app->cal_start : TER_START_MIN_MS;
+        if(gap >= start_thr) {
+            /* Start gap confirmed. Calibrate ONLY from reasonable gaps
+             * (< 2000ms = actual PAUSE, not idle silence). */
+            if(gap < 2000) {
+                app->cal_d01   = gap * 42 / 100;
+                app->cal_d12   = gap * 62 / 100;
+                app->cal_start = gap * 85 / 100;
+                app->cal_done  = true;
+            }
             app->ter_rx.state    = TerDigit;
             app->ter_rx.trit_idx = 0;
         } else {
@@ -274,16 +366,25 @@ static void ir_rx_callback(void* ctx, InfraredWorkerSignal* signal) {
             app->ter_rx.state = TerIdle;
         }
         break;
+    }
+        break;
 
     case TerDigit: {
-        if(gap >= TER_START_MIN_MS) {
-            /* Unexpected start gap mid-character -> framing error.
-             * Treat this as new start confirmation. */
+        uint32_t start_thr = app->cal_done ? app->cal_start : TER_START_MIN_MS;
+        if(gap >= start_thr) {
+            /* Unexpected start gap mid-character -> new start.
+             * Recalibrate only from reasonable gaps. */
+            if(gap < 2000) {
+                app->cal_d01   = gap * 42 / 100;
+                app->cal_d12   = gap * 62 / 100;
+                app->cal_start = gap * 85 / 100;
+                app->cal_done  = true;
+            }
             app->ter_rx.trit_idx = 0;
             break;
         }
 
-        int digit = ter_classify_gap(gap);
+        int digit = ter_classify_gap(app, gap);
         if(digit < 0) {
             /* Should not happen (gap >= START but caught above) */
             app->ter_rx.state = TerIdle;
@@ -986,6 +1087,7 @@ int32_t ir_bridge_app(void* p) {
             uint32_t elapsed = furi_get_tick() - app->last_signal_tick;
             if(elapsed >= TER_MSG_TIMEOUT_MS) {
                 app->ter_rx.state = TerIdle;
+                app->cal_done = false;  /* reset calibration for next message */
                 char line[LINE_LEN];
                 snprintf(line, LINE_LEN, "RX(%u): %.30s",
                     (unsigned)app->rx_msg_len, app->rx_msg);
