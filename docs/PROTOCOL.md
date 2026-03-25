@@ -55,7 +55,7 @@ PwmData ──[gap >= START_MIN]──> framing error, -> PwmWaitConfirm
 ### IR parameters
 
 - Carrier: 36 kHz, 33% duty cycle
-- Mark durations encode data; spaces are fixed 5ms
+- Mark durations encode data; spaces are fixed 3ms
 
 ### Byte encoding
 
@@ -64,10 +64,10 @@ Each byte is 8 mark/space pairs (MSB first):
 | Mark type | Duration |
 |-----------|----------|
 | Start mark | 50ms (50000 us) |
-| Bit 0 mark | 10ms (10000 us) |
-| Bit 1 mark | 26ms (26000 us) |
+| Bit 0 mark | 8ms (8000 us) |
+| Bit 1 mark | 16ms (16000 us) |
 | End mark | 75ms (75000 us) |
-| Space (all) | 5ms (5000 us) |
+| Space (all) | 3ms (3000 us) |
 
 ### Frame structure
 
@@ -89,7 +89,8 @@ The Psion opens `TTY:B` at 4800 baud and reads bytes. The SIR hardware interpret
 
 ## Flipper <-> ESP32: UART protocol
 
-115200 baud, 8N1, newline-terminated ASCII strings.
+115200 baud, 8N1, newline-terminated ASCII over Flipper GPIO header.
+The official ESP32-S2 WiFi devboard plugs directly into the Flipper.
 
 ### Commands (Flipper -> ESP32)
 

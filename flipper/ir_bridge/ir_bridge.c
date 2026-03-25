@@ -13,11 +13,11 @@
 #define TX_DUTY 0.33f
 
 /* Pulse-width TX (Flipper -> Psion), unchanged from v6 */
-#define MARK_BIT0  10000
-#define MARK_BIT1  26000
+#define MARK_BIT0  8000
+#define MARK_BIT1  16000
 #define MARK_START 50000
 #define MARK_END   75000
-#define SPACE_US    5000
+#define SPACE_US    3000
 
 /* Ternary RX decoder (Psion OPX -> Flipper)
  *
