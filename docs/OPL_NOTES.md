@@ -39,7 +39,52 @@ Files must be in Wine's `C:\` root (`~/.wine/drive_c/`). Subdirectories cause "F
 - **IOC + PAUSE polling doesn't work for timeouts:** The status variable is not updated during `PAUSE`. Only `IOWAITSTAT` can wait for async completion, but it has no timeout.
 - **Blocking IOW is reliable:** `IOW(-1, 1, #pbuf&, ln%)` blocks until data arrives. Use EOT byte (0x04) as end-of-message signal instead of trying to implement timeouts.
 
+### Reserved words (cause "Declaration error" or "Syntax error")
+
+- `cmd$` — conflicts with CMD$ keyword. Use `op$` or similar.
+- `hex$` — conflicts with HEX$() function. Use `hx$`.
+- `menu` — conflicts with MENU keyword. Cannot use as label name.
+- `state%` — works as variable, listed here as caution (no conflict found).
+
+### LOCAL placement
+
+- **ALL LOCAL/GLOBAL declarations must be at the TOP of a PROC**, before any executable statements. Declaring LOCAL mid-procedure causes "Structure fault".
+
+### TRAP limitations
+
+- **TRAP only works before OPL keywords:** TRAP DELETE, TRAP LOADM, TRAP OPEN, etc.
+- **TRAP does NOT work before procedure calls:** `TRAP MyProc:` causes "Syntax error". Use ONERR instead.
+
+### GOTO inside IF
+
+- GOTO from inside IF/ENDIF to a label outside may cause "Missing label" error. Restructure code to avoid GOTO inside IF blocks. Move GOTO after ENDIF.
+
+### LOADM (loading OPO modules)
+
+- `LOADM "file.opo"` loads an OPO as a procedure library.
+- Procedures in the loaded module become callable by name.
+- **GLOBAL variables are NOT shared** between caller and loaded module. Each module has its own GLOBAL namespace.
+- **Inter-module communication:** Pass address via parameter. Caller passes `ADDR(result$)`, module writes via `POKE$ addr&, text$`.
+- Module convention: define `PROC Task:(buf&)` as entry point, no `Main:`.
+- Use `TRAP UNLOADM "file.opo"` to unload after use.
+
+### Binary file I/O
+
+- `IOOPEN(handle%, name$, mode%)`: mode 2 = create/replace as binary stream.
+- `IOW(handle%, 2, #buf&, len%)`: write raw bytes. **Must use # before buffer variable.**
+- `IOCLOSE(handle%)`: close file.
+- `LOPEN`/`LPRINT` creates **text** files with EPOC text headers — wrong for binary .opo files.
+- `ALLOC(size%)` allocates raw memory. `POKEB addr&, byte%` writes single byte. Memory freed on program exit.
+
+### OPX build notes
+
+- PETRAN requires 3 UIDs: `-uid1 0x10000079 -uid2 0x1000005d -uid3 0x101F9B01`
+- Missing uid1 (KDynamicLibraryUid) causes "Nicht unterstützt" on Psion.
+- DLLTOOL needs `--as "C:\\path\\AS.EXE"` flag — cannot find assembler automatically.
+- OPX compile: use `/Epoc32/Include` (Cygwin path) for GCC -I flag.
+
 ## Wine / OPLTRAN quirks
 
 - Running OPLTRAN rapidly in a loop causes sporadic false errors (Wine initialization race). Add `sleep 0.3` between compilations or compile individually.
 - Resource file warning (`Unable to open resource file ...oplr.r01`) is harmless — compilation still succeeds.
+- Non-ASCII characters (em dash, etc.) in REM comments can confuse OPLTRAN line counting and cause errors on wrong lines.

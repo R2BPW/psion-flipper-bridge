@@ -1,0 +1,122 @@
+  1. SIR serial TX через TTY:B — потенциально 1000x
+
+  Это радикальный вариант. Вместо IrDAConnectToSend&: пишем байты напрямую в TTY:B (SIR serial):
+
+  OPL:
+    LOPEN "TTY:B"
+    IOW(-1, 7, sr%(), d%)    REM настроить 4800 baud
+    LPRINT msg$;             REM отправить байты
+    LCLOSE
+
+  Каждый байт на 4800 baud = ~2ms. "HELLO" = ~10ms вместо 50 секунд.
+
+  Но: SIR — это baseband-пульсы (3/16 bit period = ~39μs). TSOP на Flipper настроен на 38kHz carrier. На малом расстоянии
+   (10-20см) TSOP может реагировать на сырые пульсы без несущей — но это нужно проверить.
+
+  Если TSOP не срабатывает — можно подключить сырой фотодиод к GPIO Flipper'а (простая обвязка, но это уже доп. железо).
+
+  На стороне Flipper: вместо InfraredWorker — читать GPIO таймером и декодировать SIR-фрейм (start bit + 8 data + stop).
+
+  2. Уменьшить IrDA overhead через IOCtl
+
+  Попробовать сконфигурировать IrDA-стек EPOC на более короткий discovery timeout. Сейчас ~955ms на connect+disconnect.
+  Если удастся снизить до ~400ms — это 2x ускорение на уровне каждого burst'а.
+
+  Нужно исследовать EPOC IrDA IOCtl API. Документация скудная.
+
+  3. Fast38 приём на Psion (Flipper → Psion ускорение)
+
+  Идея: Flipper кодирует ответ LLM в тот же ternary mark/space формат, что
+  OPX использует для Psion→Flipper (irflash_sir.cpp). Psion принимает через
+  RBusDevComm @ 38400 baud с SIR, декодирует по байтам.
+
+  Текущий Flipper→Psion: pulse-width modulation @ 36kHz, Psion читает TTY:B
+  @ 4800 baud. ~1.2 сек/символ, 200 символов = 30-50 сек.
+  Новый: ternary @ 38kHz, ~9ms/символ, 200 символов = ~1.8 сек. Ускорение ~25x.
+
+  3.1 Проблема модуляции: SIR framing vs непрерывный PWM
+
+  Psion TX (OPX): пишет 0x00 через UART+SIR @ 38400. Каждый байт = 10 бит:
+    start(0) + 8×data(0) + stop(1)
+  SIR-кодировщик: бит 0 = ИК-пульс 3/16 периода (~4.9µs), бит 1 = тишина.
+  Итого: 9 пульсов + 1 gap (~26µs на stop bit) каждые ~260µs.
+  TSOP Flipper не замечает 26µs gap — видит сплошной carrier. Работает.
+
+  Flipper TX: infrared_send_raw_ext(38000, 0.33) = непрерывный PWM 38kHz.
+  Нет stop-bit gaps. Для TSOP разницы нет, но для SIR-декодера Psion — есть.
+
+  Psion SIR receiver: демодулятор → baseband LOW (carrier) / HIGH (тишина) → UART.
+  При непрерывном carrier UART видит бесконечный LOW:
+    start(0) ok → data(00000000) ok → stop(ожидает 1, видит 0) → FRAMING ERROR
+  UART теряет синхронизацию. Байты могут: (a) приходить как 0x00 с error flag,
+  (b) теряться, (c) приходить мусором.
+
+  3.2 Варианты решения
+
+  A) Пробуем в лоб — если UART отдаёт байт при framing error, порог < 0x80
+     всё ещё отличит mark от space. Нужен эмпирический тест.
+
+  B) Эмулируем SIR byte framing на Flipper — вместо одного длинного mark
+     шлём серию микро-mark/space пар: mark ~234µs (9 бит) + space ~26µs (1 бит).
+     UART видит корректные 0x00 байты. Но infrared_send_raw_ext() может
+     не поддерживать тайминги в десятках µs (минимальное разрешение?).
+
+  C) Другой baud rate на приёме — подобрать скорость, при которой
+     непрерывный carrier даёт предсказуемые байты без framing errors.
+
+  D) GPIO + raw photodiode вместо SIR — обходим UART, но требует доп. железо.
+
+  3.3 Результаты эмпирических тестов
+
+  Тест 1: Flipper PW @36kHz, Psion RBusDevComm @4800 (SetBaud)
+  → FF FF E30 (2 idle байта, потом error -30 line fail)
+  Вывод: SetBaud с 38400 на 4800 ломает SIR приём.
+
+  Тест 2: Flipper PW @36kHz, Psion RBusDevComm @38400 (без переключения)
+  → FF 80 00 80 00 00 80 00 80 00 00 80 ... (40 байт стабильно)
+  Вывод: данные приходят! Beat pattern 00/80 из-за 36kHz vs 38400.
+
+  Тест 3: Flipper PW @38kHz, Psion RBusDevComm @38400
+  → FF E (1 idle байт, мгновенная ошибка)
+  Вывод: точное совпадение 38kHz = 38400 = все биты 0, нет stop bit,
+  framing error. 38kHz ХУЖЕ чем 36kHz!
+
+  Тест 4: Flipper ternary @36kHz, Psion RBusDevComm @38400
+  → 0080C0800000C0800000C08000800080... (62 байта, нет FF)
+  Вывод: и mark и space дают одинаковый 00/80/C0 паттерн.
+  Space не отличается от mark по значениям байтов.
+  Возможно: SIR декодер при 36kHz не генерирует FF даже при тишине,
+  или нужна другая стратегия (timing-based, не value-based).
+
+  3.4 Работающий путь: chat_a (close/reopen OPX)
+
+  OPL закрывает OPX (IrClose), открывает TTY:B @4800,
+  принимает pulse-width, закрывает TTY:B, переоткрывает OPX (IrInit).
+  Контенция портов решена. Работает стабильно.
+
+  3.5 Оптимизация таймингов PW (результат)
+
+  Инкрементальный подход: менять по одной константе, тестировать.
+  Полная перезапись send_to_psion ломает приём — структура функции критична
+  (отдельные вызовы infrared_send_raw_ext для START, data chunks, END).
+
+  Найденные границы:
+  - MARK_BIT0: 10ms → 8ms (работает). 6ms не тестировали.
+  - MARK_BIT1: 26ms → 16ms (работает). 14ms не работает.
+  - SPACE_US: 5ms → 3ms (работает). 2ms не тестировали.
+  - 9600 baud: не видит 36kHz carrier вообще. Только 4800 работает.
+
+  Итого: bit0=8ms, bit1=16ms, space=3ms
+  Было: 8×((10+26)/2+5) = 184ms/байт → ~37 сек на 200 символов
+  Стало: 8×((8+16)/2+3) = 120ms/байт → ~24 сек на 200 символов
+  Ускорение: ~35%
+
+  Потолок 4800 baud: ternary дал бы ~11 сек (3x), но требует перезаписи
+  send_to_psion которая пока ломает приём. Оставлено на будущее.
+
+  3.6 Актуальный рабочий стек
+
+  Flipper: pulse-width @36kHz, bit0=8ms, bit1=16ms, space=3ms
+  Psion TX: OPX irflash_sir (38400 SIR ternary) — ~100ms на HELLO
+  Psion RX: chat_a (close OPX → TTY:B @4800 → PW decode → reopen OPX)
+  Скорость: TX ~100ms, RX ~24 сек на 200 символов

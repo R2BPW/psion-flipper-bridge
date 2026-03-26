@@ -558,7 +558,7 @@ static void send_to_psion(IrBridgeApp* app, const char* text) {
     view_port_update(app->vp);
 
     size_t tlen = strlen(text);
-    if(tlen > 200) tlen = 200;
+    if(tlen > 500) tlen = 500;
 
     infrared_worker_rx_stop(app->ir_worker);
 
