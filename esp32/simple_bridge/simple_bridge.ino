@@ -13,9 +13,9 @@
 #include <WiFiClientSecure.h>
 #include <WiFiServer.h>
 
-#define WIFI_SSID     "tema"
-#define WIFI_PASS     "19101951"
-#define API_KEY       "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"
+#define WIFI_SSID     ""
+#define WIFI_PASS     ""
+#define API_KEY       ""
 #define API_HOST      "openrouter.ai"
 #define API_PATH      "/api/v1/chat/completions"
 #define MODEL         "google/gemini-2.0-flash-001"
